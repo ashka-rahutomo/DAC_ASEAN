@@ -1,84 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-01_jakarta_single_bed_tvsa.py
-
-Full-Python 1D finite-volume axial-bed TVSA Direct Air Capture model for one
-Jakarta representative case.
-
-Project path on the user's machine:
-    D:/Ashka/5.DAC/06.PYTHON
-
-Baseline references used for defaults:
-    1. Jajjawi et al. weather-dependent TVSA DAC model and SI
-    2. Sendi et al. geospatial DAC workflow
-    3. Deschamps et al. VTSA DAC Aspen Adsorption paper
-    4. Explicit assumptions marked in parameter blocks
-
-Main features
--------------
-- 1D axial packed-bed finite-volume model with 10 nodes by default.
-- Default 3 cycles for detailed dynamic diagnostic runs; CSV output is last cycle only.
-- CO2 = 400 ppm.
-- Lewatit VP OC 1065 baseline adsorbent.
-- WADST CO2-H2O co-adsorption and GAB H2O isotherm.
-- LDF kinetics with constant MTC values from Jajjawi/Young.
-- CO2 and H2O adsorbed; N2 and O2 inert.
-- Five fixed-time cycle steps:
-    1. adsorption
-    2. evacuation
-    3. heating desorption
-    4. closed cooling
-    5. repressurization
-- Product is taken from the outlet face only, not from the whole bed.
-- Ideal valves:
-    open   = pressure/flow boundary active
-    closed = no external convective flux
-- Ergun equation used for pressure-flow relation in vacuum/repressurization
-  and pressure-drop/fan calculation during adsorption.
-- Gas, solid, wall, and jacket-fluid temperatures are separate states.
-- Jacket fluid is plug-flow along the bed.
-- Product stream before compression includes CO2, H2O, N2, O2.
-- Local RH, RH cap, and supersaturation diagnostics are reported.
-- F1, F4, F5, F6 implemented:
-    clipping/flooring diagnostics,
-    solver log,
-    mass-balance residual,
-    energy-balance proxy residual.
-- F2 intentionally not implemented:
-    no log-state positivity transform.
-- F3 available for speed/stability:
-    sparse-Jacobian pattern is optional and off by default.
-
-Outputs
--------
-Output folder:
-    D:/Ashka/5.DAC/06.PYTHON/outputs/jakarta
-
-Core outputs for the default 3-cycle run:
-    profiles_cycle3_long.csv
-    profiles_cycle3_nodes.csv
-    product_cycle3.csv
-    energy_cycle3.csv
-    summary_cycle3.csv
-    summary_all_cycles.csv
-    mass_balance_cycle3.csv
-    energy_balance_cycle3.csv
-    diagnostics_cycle3.csv
-    solver_log.csv
-    model_config.json
-
-Plots:
-    pressure_profile_all_cycles.png
-    pressure_profile_last_cycle.png
-    temperature_profile_all_cycles.png
-    temperature_profile_last_cycle.png
-    solid_loading_co2_all_cycles.png
-    solid_loading_co2_last_cycle.png
-    product_co2_h2o_all_cycles.png
-    product_co2_h2o_last_cycle.png
-    energy_breakdown_last_cycle.png
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
@@ -239,9 +158,6 @@ class CycleConfig:
     heating_desorption_time_s: float = 77.5 * 60.0
     cooling_time_s: float = 600.0
     repressurization_time_s: float = 180.0
-
-    # Fixed-time surrogate mode is retained, but these thresholds are used for
-    # Aspen/Jajjawi-like process-quality diagnostics.
     desorption_co2_cutoff_mol_s: float = 1.0e-6
     cooling_max_sorbent_temperature_K: float = 348.15  # 75 degC
 
@@ -251,7 +167,6 @@ class CycleConfig:
     P_high_default_Pa: float = 1.013e5
 
     # Jajjawi airflow = 6.2 L/s for D = 10 cm bed.
-    # This gives u = 0.789409 m/s and is NOT clipped.
     air_volumetric_flow_m3_s_ref: float = 6.2e-3
 
     # Jacket medium from Jajjawi SI.
@@ -265,7 +180,6 @@ class CycleConfig:
     COP_chiller: float = 3.0
 
     # Practical pump/valve limits for numerical stability.
-    # Adsorption u follows Jajjawi directly; these limits apply to product/repressurization.
     max_product_superficial_velocity_m_s: float = 0.05
     max_repress_superficial_velocity_m_s: float = 0.10
 
@@ -289,8 +203,6 @@ class CycleConfig:
 
 @dataclass
 class NumericConfig:
-    # Stable defaults for the finite-volume TVSA model.
-    # Use tighter settings from CLI for final high-resolution runs.
     sample_dt_s: float = 10.0
     max_step_s: float = 20.0
     rtol: float = 1e-3
@@ -341,7 +253,7 @@ class NumericConfig:
     use_total_voidage_for_gas_accumulation: bool = True
 
     # Relative tolerance for cycle-to-cycle KPI convergence diagnostics.
-    css_relative_tolerance: float = 0.05
+    css_relative_tolerance: float = 0.001
 
     # Store axial node records less frequently to reduce memory and CSV/plot overhead.
     node_record_stride_s: float = 30.0
@@ -375,10 +287,6 @@ class NumericConfig:
     gas_temperature_eq_tau_s: float = 60.0
 
     # Numerical regularization for the explicit jacket-fluid state.
-    # The physical jacket residence time implied by the tiny lab-scale holdup can
-    # be << 1 s, which makes cooling/heating unnecessarily stiff compared with
-    # the minute-scale cycle. This lower bound preserves the same steady state
-    # while preventing BDF from taking near-machine-precision steps.
     jacket_tau_min_s: float = 120.0
 
     # Smooth inlet switching from hot to cold jacket fluid without splitting the cycle step.
@@ -412,16 +320,6 @@ class NumericConfig:
 
 
 def smooth_floor(x: np.ndarray | float, floor: np.ndarray | float, rel_width: float = 1e-6, abs_width: float = 1e-12) -> np.ndarray:
-    """
-    Smooth approximation of max(x, floor), exact away from the floor.
-
-    The previous implementation clipped the softplus argument at +60 and
-    returned floor + 60*w for all normal values far above the floor. That
-    collapsed ambient-pressure gas states to near-zero pressure and pushed
-    temperatures toward artificial bounds. This corrected version only smooths
-    the narrow transition region around the floor and leaves normal physical
-    states unchanged.
-    """
     x_arr = np.asarray(x, dtype=float)
     f_arr = np.asarray(floor, dtype=float)
     w = np.maximum(abs_width, rel_width * np.maximum(np.abs(f_arr), 1.0))
@@ -670,9 +568,6 @@ class TVSABedModel:
         self.node_volume = self.volume / self.N
         self.m_ads_kg = bed.rho_bulk_kg_m3_bed * self.volume
         self.d_p = 2.0 * bed.particle_radius_m
-
-        # Aspen-like voidage treatment: inter-particle voidage controls axial
-        # transport; total bed voidage controls gas accumulation and inventory.
         self.epsilon_inter = float(bed.epsilon_b)
         self.epsilon_total = float(bed.epsilon_b + (1.0 - bed.epsilon_b) * bed.epsilon_p)
         self.epsilon_gas_accum = (
@@ -715,20 +610,11 @@ class TVSABedModel:
             dtype=float,
         )
         if self.numeric.use_nondimensional_state:
-            # Dimensionless solver variables are O(1); a scalar absolute tolerance
-            # is appropriate here. Physical tolerances are represented by scaling.
             self.atol_solver = self.numeric.atol
         else:
             self.atol_solver = self.build_atol_vector() if self.numeric.use_vector_atol else self.numeric.atol
 
     def build_atol_vector(self) -> np.ndarray:
-        """
-        Build state-specific absolute tolerances for solve_ivp.
-
-        The physical state remains dimensional. This vector only tells the
-        solver that gas concentration, solid loading, and temperature have
-        different meaningful error scales.
-        """
         N = self.N
         num = self.numeric
         return np.concatenate([
@@ -742,13 +628,6 @@ class TVSABedModel:
 
 
     def build_state_scale_vector(self) -> np.ndarray:
-        """
-        Build dimensional scales for nondimensional solver states.
-
-        C scales are component-specific feed concentrations, with a floor for
-        trace species such as CO2. q scales come from the initial equilibrium
-        loading at ambient feed. Temperature states use a constant Kelvin scale.
-        """
         N = self.N
         num = self.numeric
 
@@ -790,12 +669,6 @@ class TVSABedModel:
         return y_solver_matrix * self.state_scale[:, None]
 
     def rhs_solver(self, t: float, y_solver: np.ndarray, step_name: str) -> np.ndarray:
-        """
-        RHS in solver coordinates.
-
-        Physical equations are evaluated in dimensional units, then scaled back
-        so BDF/Radau sees O(1) state magnitudes.
-        """
         y_dim = self.from_solver_state(y_solver)
         dy_dim = self.rhs(t, y_dim, step_name)
         if not self.numeric.use_nondimensional_state:
@@ -834,14 +707,6 @@ class TVSABedModel:
         return idx
 
     def build_jac_sparsity(self):
-        """
-        Conservative sparse-Jacobian pattern for the 1D finite-volume bed.
-
-        Each node equation is allowed to depend on all variables in node i and
-        its immediate neighbors. This is slightly denser than necessary, but it
-        is much cheaper than a full dense numerical Jacobian and preserves the
-        same model equations.
-        """
         N = self.N
         n_state = N * len(COMPONENTS) + N * len(ADS_COMPONENTS) + 4 * N
         S = lil_matrix((n_state, n_state), dtype=bool)
@@ -898,14 +763,6 @@ class TVSABedModel:
         return self.pack(C0, q0, Tg0, Ts0, Tw0, Tj0)
 
     def regularize_gas_state(self, C: np.ndarray, Tg: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Apply finite, positive, gas-capacity regularization with smooth floors.
-
-        Smooth floors are used for near-boundary states to avoid the derivative
-        discontinuities caused by hard np.maximum/np.clip in the RHS. Hard
-        nan_to_num is retained only as a last-resort finite guard for BDF trial
-        states.
-        """
         num = self.numeric
         relw = num.smooth_floor_rel_width
         absw = num.smooth_floor_abs_width
@@ -966,12 +823,6 @@ class TVSABedModel:
             ysum[bad_y] = 1.0
         ygas = ygas / np.maximum(ysum[:, None], 1e-30)
 
-        # Physical gas-state regularization only.
-        # Important: do NOT apply the vacuum/thermal pressure floor here.
-        # That floor is only allowed in gas-energy denominators. Applying it
-        # here changes physical inventory, corrupts product accounting, and can
-        # break mass balance. Ctot below is the physical gas concentration after
-        # only finite/positivity guards.
         Ctot = smooth_floor(
             Ctot_raw,
             len(COMPONENTS) * num.min_concentration_mol_m3,
@@ -1050,13 +901,6 @@ class TVSABedModel:
         return self.smoothstep01(float(t_step_s) / float(ramp))
 
     def repressurization_pressure_factor(self, P_nodes_Pa: np.ndarray) -> float:
-        """
-        Smoothly reduce feed flow when the bed approaches ambient pressure.
-
-        This preserves fixed-time repressurization while avoiding pressure
-        overshoot and the associated stiffness from forcing flow into an already
-        pressurized bed.
-        """
         Pavg = float(np.mean(P_nodes_Pa))
         margin = max(float(self.cycle.repressurization_pressure_stop_margin_Pa), 0.0)
         if Pavg >= self.P_amb_Pa - margin:
@@ -1068,11 +912,6 @@ class TVSABedModel:
 
 
     def product_pressure_factor(self, P_nodes_Pa: np.ndarray, step_name: str) -> float:
-        """
-        Smoothly reduce product withdrawal when the bed is already close to
-        vacuum. This avoids overdraw during evacuation and lets desorption reopen
-        the product path when generated gas raises bed pressure.
-        """
         if step_name not in {"evacuation", "heating_desorption"}:
             return 1.0
 
@@ -1085,10 +924,6 @@ class TVSABedModel:
         return self.smoothstep01(raw)
 
     def near_vacuum_temperature_mask(self, Ctot: np.ndarray, Tg: np.ndarray, step_name: str) -> np.ndarray:
-        """
-        Mask nodes where the gas phase is near vacuum and gas thermal inertia is
-        negligible. Used only for the optional Tg≈Ts thermal regularization.
-        """
         if not self.numeric.use_near_vacuum_gas_temperature_equilibrium:
             return np.zeros_like(Ctot, dtype=bool)
         if step_name not in {"heating_desorption", "closed_cooling"}:
@@ -1101,12 +936,6 @@ class TVSABedModel:
     # -------------------------------------------------------------------------
 
     def ergun_velocity_from_gradient(self, gradP_Pa_m: np.ndarray, mu: np.ndarray, rho: np.ndarray) -> np.ndarray:
-        """
-        Solve Ergun equation for superficial velocity u from:
-            -dP/dz = A*u + B*|u|u
-
-        gradP_Pa_m is dP/dz. Driving force is S = -dP/dz.
-        """
         eps = self.bed.epsilon_b
         dp = self.d_p
         A = 150.0 * mu * (1.0 - eps) ** 2 / (dp ** 2 * eps ** 3)
@@ -1125,13 +954,6 @@ class TVSABedModel:
         return sign * np.maximum(u_abs, 0.0)
 
     def face_velocities(self, C: np.ndarray, Tg: np.ndarray, step_name: str, t_step_s: float = 0.0) -> np.ndarray:
-        """
-        Return N+1 face velocities [m/s].
-        Positive velocity is from feed/inlet side (left) to outlet/product side (right).
-
-        Vectorized internal-face implementation to reduce RHS cost during
-        heating desorption.
-        """
         N = self.N
         u_faces = np.zeros(N + 1)
 
@@ -1198,12 +1020,6 @@ class TVSABedModel:
         return u_faces
 
     def component_convective_fluxes(self, C: np.ndarray, Tg: np.ndarray, step_name: str) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Face convective fluxes [mol/m2/s] for each component.
-        Returns:
-            flux_faces: shape (N+1, 4)
-            u_faces: shape (N+1,)
-        """
         N = self.N
         C_safe, Tg_safe, _, _ = self.regularize_gas_state(C, Tg)
         u_faces = self.face_velocities(C_safe, Tg_safe, step_name)
@@ -1234,10 +1050,6 @@ class TVSABedModel:
         return flux, u_faces
 
     def component_convective_fluxes_given_u(self, C_safe: np.ndarray, u_faces: np.ndarray, step_name: str) -> np.ndarray:
-        """
-        Component convective fluxes using precomputed concentration and face
-        velocities. Vectorized to reduce RHS overhead.
-        """
         N = self.N
         ncomp = len(COMPONENTS)
         flux = np.zeros((N + 1, ncomp), dtype=float)
@@ -1246,7 +1058,6 @@ class TVSABedModel:
         pos = u >= 0.0
         active = np.abs(u) >= 1e-15
 
-        # Internal faces: if positive, upwind from left node; if negative, from right node.
         if N > 1:
             idx = np.arange(1, N)
             pos_int = pos[idx]
@@ -1280,13 +1091,6 @@ class TVSABedModel:
 
 
     def axial_dispersion_face_coeffs(self, u_faces: np.ndarray) -> np.ndarray:
-        """
-        Component-wise axial dispersion coefficients at faces [m2/s].
-
-        This is closer to Aspen-style packed-bed transport than a single global
-        Peclet coefficient: each component retains its molecular diffusivity and
-        the mechanical dispersion term follows the local face velocity.
-        """
         u_abs = np.abs(np.asarray(u_faces, dtype=float))
         Dm_vec = np.array([DM[comp] for comp in COMPONENTS], dtype=float)
         D_face = Dm_vec[None, :] + self.numeric.longitudinal_dispersivity_m * u_abs[:, None]
@@ -1300,15 +1104,6 @@ class TVSABedModel:
         step_name: str,
         u_faces: np.ndarray | None = None,
     ) -> np.ndarray:
-        """
-        Axial dispersion fluxes [mol/m2/s].
-        Fick form: J = -epsilon_inter * D_ax,k(face) * dC_k/dz.
-
-        External diffusive flux is active only at the adsorption inlet. During
-        evacuation, desorption, closed cooling, and repressurization, external
-        molecular diffusion through closed valves is zero. Internal axial
-        dispersion remains active, including during closed cooling.
-        """
         N = self.N
         C_safe, _, _, _ = self.regularize_gas_state(C, Tg)
         flux = np.zeros((N + 1, len(COMPONENTS)), dtype=float)
@@ -1333,9 +1128,6 @@ class TVSABedModel:
 
 
     def gas_enthalpy_fluxes(self, C: np.ndarray, Tg: np.ndarray, step_name: str) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Face gas enthalpy flux [J/m2/s] for convective energy transport.
-        """
         N = self.N
         comp_flux, u_faces = self.component_convective_fluxes(C, Tg, step_name)
         h_flux = np.zeros(N + 1)
@@ -1365,10 +1157,6 @@ class TVSABedModel:
         Tg_safe: np.ndarray,
         step_name: str,
     ) -> np.ndarray:
-        """
-        Face gas enthalpy flux [J/m2/s] from an existing component-flux array.
-        Vectorized to reduce RHS cost.
-        """
         N = self.N
         ndot_area = np.sum(comp_flux, axis=1)
         h_flux = np.zeros(N + 1, dtype=float)
@@ -1699,9 +1487,6 @@ class TVSABedModel:
         dP_bed = max(dPdz * self.bed.bed_length_m, 0.0)
 
         # Jacket utility duty and bed-side heat transfer are reported separately.
-        # Q_heat_W/Q_cool_W are bed-side heat input/removal through the wall and are
-        # used for KPI/SEC. Utility-loop duty is kept as a diagnostic because it
-        # can be much larger for an over-specified jacket flow.
         mdot_j = self.jacket_mdot(step_name)
         Tj_in = self.jacket_inlet_temperature(step_name, t_step_s)
         Tj_out = float(Tj_safe[-1])
@@ -1750,7 +1535,7 @@ class TVSABedModel:
 
         # Diagnostic heat of adsorption/desorption based on the current LDF rate.
         # Positive Q_ads_W means heat released to the bed; negative means heat
-        # consumed by desorption. This is used only for energy-closure diagnostics.
+        # consumed by desorption.
         dqdt_diag = np.zeros_like(q_safe)
         dqdt_diag[:, AIDX["CO2"]] = self.ads.k_ldf_co2_s * (qeq_co2 - q_safe[:, AIDX["CO2"]])
         dqdt_diag[:, AIDX["H2O"]] = self.ads.k_ldf_h2o_s * (qeq_h2o - q_safe[:, AIDX["H2O"]])
@@ -1864,18 +1649,6 @@ class TVSABedModel:
         duration_s: float,
         t_eval: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]], int]:
-        """
-        Efficient substep pressure model for evacuation/repressurization.
-
-        This is not a zero-work algebraic jump. It uses internal substeps to:
-        1) move gas pressure smoothly toward the step target,
-        2) update CO2/H2O loadings with LDF kinetics during the pressure step,
-        3) compute feed/product rates from total gas+solid inventory changes.
-
-        It is still much cheaper than solving the full 200-state non-isothermal
-        ODE, but the pressure step now has nonzero work diagnostics and does not
-        leave all loading unchanged before heating desorption.
-        """
         C0, q0, Tg0, Ts0, Tw0, Tj0 = self.unpack(y0_dim)
         C0_safe, Tg_safe, Ctot0, ygas0 = self.regularize_gas_state(C0, Tg0)
         Ts_safe = smooth_clip(
@@ -1970,8 +1743,7 @@ class TVSABedModel:
             dt = max(t_new - t_old, 1e-12)
 
             # LDF loading update over this pressure substep using the previous
-            # gas state. This avoids leaving the adsorbent frozen during the
-            # evacuation pressure reset.
+            # gas state.
             qeq_co2, qeq_h2o, *_ = equilibrium_loadings(C_prev, Ts_safe, self.ads)
             q_new = q_prev.copy()
             q_new[:, AIDX["CO2"]] = qeq_co2 + (q_prev[:, AIDX["CO2"]] - qeq_co2) * math.exp(-self.ads.k_ldf_co2_s * dt)
@@ -2032,8 +1804,6 @@ class TVSABedModel:
                 pass
 
             # Attach rates to exact reporting points reached in this interval.
-            # If several reporting points fall within one interval, they receive
-            # the same interval-average rate.
             for t_report in t_eval_list:
                 if t_old < t_report <= t_new + 1e-12:
                     # Ensure state is available even for non-grid roundoff cases.
@@ -2047,8 +1817,7 @@ class TVSABedModel:
             inv_prev = inv_new
 
         # Build overrides in t_eval order by finite-difference inventory over
-        # reporting intervals. This keeps CSV-integrated product/feed amounts
-        # consistent with the stored states.
+        # reporting intervals.
         prev_C = None
         prev_q = None
         prev_t = None
@@ -2119,15 +1888,11 @@ class TVSABedModel:
         t_eval: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]], int]:
         """
-        Fast operator-split heating desorption model.
-
-        This mode is intended for runtime-efficient screening. It keeps the
-        main CO2/H2O physics active:
+        It keeps the main CO2/H2O physics active:
         - WADST/GAB equilibrium,
         - LDF desorption for CO2 and H2O,
         - heat of desorption,
         - wall/jacket heat transfer,
-        - vacuum product accounting from inventory loss.
 
         Simplifications:
         - N2/O2 are frozen during heating by default;
@@ -2255,28 +2020,19 @@ class TVSABedModel:
             dqdt = (q_new - q_old) / dt
 
             # Preliminary desorbed amount from adsorbed-phase swing. This is used
-            # only to set the near-vacuum gas composition. The actual product
-            # amount is calculated later from total inventory loss, so product
-            # CO2/H2O cannot exceed loading swing + gas inventory loss.
+            # only to set the near-vacuum gas composition.
             ads_loss_guess = np.zeros(len(COMPONENTS), dtype=float)
             ads_loss_guess[IDX["CO2"]] = max(float(np.sum((q_old[:, AIDX["CO2"]] - q_new[:, AIDX["CO2"]]) * self.bed.rho_bulk_kg_m3_bed * self.node_volume)), 0.0)
             ads_loss_guess[IDX["H2O"]] = max(float(np.sum((q_old[:, AIDX["H2O"]] - q_new[:, AIDX["H2O"]]) * self.bed.rho_bulk_kg_m3_bed * self.node_volume)), 0.0)
 
             inv_before = total_inventory_vec(C_prev, q_old)
 
-            # Keep the gas holdup fixed during the fast heating split. Under the
-            # near-vacuum condition, gas inventory is small relative to the
-            # adsorbed inventory, and resetting gas composition each substep can
-            # create artificial inventory oscillations. Product is therefore tied
-            # directly to the total physical inventory loss.
+            # Keep the gas holdup fixed during the fast heating split.
             C_new = C_prev.copy()
             inv_after_prethermal = total_inventory_vec(C_new, q_new)
 
             # Conservative cumulative product accounting: during heating there
-            # is no feed and no vent. Product at any time cannot exceed the net
-            # loss of physical inventory from the start of heating. This prevents
-            # artificial product over-counting if explicit thermal splitting
-            # causes small inventory oscillations between substeps.
+            # is no feed and no vent. 
             product_cum_target = np.maximum(inv_start_heating - inv_after_prethermal, 0.0)
             if self.numeric.freeze_inert_during_heating_desorption:
                 product_cum_target[IDX["N2"]] = 0.0
@@ -2284,10 +2040,7 @@ class TVSABedModel:
             prod_mol = np.maximum(product_cum_target - product_cum_prev, 0.0)
             product_cum_prev = product_cum_prev + prod_mol
 
-            # Cumulative mass-balance diagnostic. For heating,
-            # inv_start - inv_current - cumulative_product should be small or
-            # negative during temporary inventory increases; it should not become
-            # positive by more than numerical tolerance.
+            # Cumulative mass-balance diagnostic.
             substep_residual = inv_start_heating - inv_after_prethermal - product_cum_prev
             self.fast_substep_diagnostics.append({
                 "step": "heating_desorption",
@@ -2738,12 +2491,6 @@ class TVSABedModel:
         return total
 
     def amount_from_rate_or_intervals(self, df: pd.DataFrame, stream: str, comp: str) -> float:
-        """
-        Return total amount for a stream/component. Fast substep models write
-        exact interval amounts; ODE-resolved steps are integrated from rates.
-        This avoids trapezoidal over/under-counting for operator-split product
-        accounting while preserving normal ODE output behavior.
-        """
         rate_col = f"{stream}_{comp}_mol_s"
         interval_col = f"{stream}_{comp}_mol_interval"
         if interval_col not in df.columns:
@@ -2964,11 +2711,6 @@ class TVSABedModel:
         Q_ads = self.integrate_col(df, "Q_ads_W") if "Q_ads_W" in df.columns else 0.0
         dU = inv_end["U_total_proxy_J"] - inv_start["U_total_proxy_J"]
 
-        # Improved proxy residual: still not a rigorous full enthalpy closure,
-        # but it now includes stream sensible enthalpy and heat of adsorption/
-        # desorption terms consistently with the sign convention used in the
-        # solid energy equation. Positive Q_ads means heat released to the bed;
-        # negative Q_ads means heat consumed by desorption.
         residual = Q_heat - Q_cool + E_fan + E_vac + E_rep + H_feed - H_vent - H_product + Q_ads - dU
         denom = max(
             abs(Q_heat) + abs(Q_cool) + abs(E_fan) + abs(E_vac) + abs(E_rep)
