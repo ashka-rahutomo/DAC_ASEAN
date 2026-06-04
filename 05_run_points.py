@@ -1,49 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-05_run_surrogate_training_tvsa.py
-
-Run selected surrogate-training TVSA simulations using the detailed 1D TVSA
-engine defined in:
-    01_jakarta_single_bed_tvsa.py
-
-Typical input from script 04:
-    outputs/surrogate_design/surrogate_training_design_300.csv
-
-Main features
--------------
-- Can run a selected row range only, e.g. rows 32 to 188.
-- Can choose the number of parallel workers.
-- Uses engine 01 through dynamic import.
-- Enforces detailed full ODE/PDE-MOL mode from script 01:
-    * no fast pressure substeps
-    * no fast heating split
-    * no inert freeze during heating
-    * no near-vacuum Tg≈Ts shortcut
-    * no nondimensional-state mode by default
-- Resume-safe: completed case folders are skipped unless --force-rerun is used.
-- Timeout-safe: cases are marked timeout and skipped onward when a step exceeds walltime/nfev limits.
-- Per-case outputs are not deleted by default.
-- Batch consolidated outputs are written under:
-    outputs/surrogate_tvsa/batches/<batch_label>/
-
-Project path:
-    D:/Ashka/5.DAC/06.PYTHON
-
-Example commands
-----------------
-Run rows 32 to 188 with 3 workers:
-    python 05_run_surrogate_training_tvsa.py --start-row 32 --end-row 188 --workers 3
-
-Run rows 189 to 292 with 2 workers:
-    python 05_run_surrogate_training_tvsa.py --start-row 189 --end-row 292 --workers 2
-
-Run only sensitivity-anchor cases:
-    python 05_run_surrogate_training_tvsa.py --design-type sensitivity_anchor --workers 2
-
-Force rerun selected rows:
-    python 05_run_surrogate_training_tvsa.py --start-row 32 --end-row 40 --force-rerun
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -161,14 +115,7 @@ def install_solver_timeout_guard(
     max_nfev_per_step: int | None = None,
     max_case_walltime_s: float | None = None,
 ) -> dict:
-    """
-    Wrap model.rhs_solver with per-step walltime and nfev guards.
 
-    This is a soft timeout: it interrupts solve_ivp when RHS is called again.
-    It catches the practical batch-stuck cases without changing the physical
-    equations. If the solver is stuck inside a low-level linear algebra call,
-    a hard subprocess watchdog would be needed.
-    """
     limits_active = any([
         max_step_walltime_s is not None and float(max_step_walltime_s) > 0.0,
         max_nfev_per_step is not None and int(max_nfev_per_step) > 0,
